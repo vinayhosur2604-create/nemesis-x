@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "outputDirectory": "static",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://nemesis-x-h5st.onrender.com/api/:path*"
+    }
+  ]
+}
