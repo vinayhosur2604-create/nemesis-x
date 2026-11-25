@@ -140,13 +140,15 @@ V.overview=`<h2>OVERVIEW</h2><div class="sub">Command-center summary. Every valu
 V.video=`<h2>VIDEO ANALYSIS</h2><div class="sub">Playback runs locally in your browser. Detection, tracking and events require the backend pipeline.</div>
 <div id="ws"><div class="card"><h3>INPUT</h3><div id="drop">Drop MP4 / AVI / MOV here<br>or click to browse</div><input id="fi" type="file" accept="video/*" hidden>
 <h3 style="margin-top:16px">LIBRARY</h3><div id="lib">${NO('No videos this session.')}</div>
-<h3 style="margin-top:16px">ANALYSIS</h3><button disabled style="width:100%">Run analysis (backend required)</button></div>
+<h3 style="margin-top:16px">ANALYSIS</h3><button id="runAnalysis" disabled style="width:100%">Run analysis</button>
+<div id="analysisStatus" class="sub" role="status" style="margin:8px 0 0;font-size:11px">Select a video to enable analysis.</div>
+<progress id="analysisProgress" max="1" value="0" hidden style="width:100%;margin-top:8px"></progress></div>
 <div class="card"><div class="stage"><video id="vp" playsinline></video><canvas id="ov"></canvas><div class="empty" id="ve"><em>NO VIDEO LOADED</em>Load a file to begin.</div></div>
 <div class="ctl"><button id="pp">Play</button><button id="fb">◂ Frame</button><button id="ff">Frame ▸</button>
 <input type="range" id="sk" min="0" max="1000" value="0"><span id="tm">0:00.00 / 0:00.00</span>
 <select id="sp"><option>0.25</option><option>0.5</option><option selected>1</option><option>1.5</option><option>2</option></select><button id="ss">Screenshot</button></div>
 <div class="sub" style="margin:8px 0 0;font-size:11px">Frame step assumes 1/30 s; true frame rate comes from the backend. Overlay layer: no detections.</div></div>
-<div><div class="card"><h3>DETECTIONS</h3>${NO()}</div><div class="card" style="margin-top:14px"><h3>IDENTITIES · EVENTS</h3>${NO()}</div><div class="card" style="margin-top:14px"><h3>PROCESSING LOG</h3><div id="log"></div></div></div></div>`;
+<div><div class="card"><h3>DETECTIONS</h3><div id="detectionResults">${NO()}</div></div><div class="card" style="margin-top:14px"><h3>IDENTITIES · EVENTS</h3><div id="trackResults">${NO()}</div></div><div class="card" style="margin-top:14px"><h3>PROCESSING LOG</h3><div id="log"></div></div></div></div>`;
 V.spatial=`<h2>SPATIAL INTELLIGENCE</h2><div class="sub">Plots only coordinates reported by the pipeline. Image-plane coordinates from monocular video are not metric 3D positions.</div><div class="card"><div class="sc" id="sc2" style="height:460px"></div></div>`;
 Object.keys(INFO).forEach(k=>{const[t,d,cs]=INFO[k];V[k]=`<h2>${t.toUpperCase()}</h2><div class="sub">${d}</div><div class="g">${cs.map(([a,b])=>`<div class="card"><h3>${a}</h3>${NO(b)}</div>`).join('')}</div>`});
 NAV.forEach(([id])=>view.insertAdjacentHTML('beforeend',`<section class="v" id="v-${id}">${V[id]}</section>`));
@@ -161,19 +163,65 @@ $('#ab').onclick=()=>$('#ai').classList.toggle('on');
 $('#q').onkeydown=e=>{if(e.key!=='Enter'||!e.target.value.trim())return;const m=$('#msgs');m.insertAdjacentHTML('beforeend',`<div class="m u"></div><div class="m s"><b>INSUFFICIENT EVIDENCE.</b> No processed video observations are available, so this cannot be determined.</div>`);m.children[m.children.length-2].textContent=e.target.value;e.target.value='';m.scrollTop=1e9};
 
 /* ---------- Logging / status ---------- */
-function log(s){S.log.push(s);$('#log').insertAdjacentHTML('beforeend',`<div>[${new Date().toLocaleTimeString()}] ${s}</div>`)}
+function log(s){S.log.push(s);const entry=document.createElement('div');entry.textContent=`[${new Date().toLocaleTimeString()}] ${s}`;$('#log').appendChild(entry)}
 const fmt=t=>{t=t||0;return Math.floor(t/60)+':'+(t%60).toFixed(2).padStart(5,'0')};
-fetch('/api/health').then(r=>{if(!r.ok)throw 0;$('#pb').className='pill ok';$('#pb').innerHTML='<i></i>BACKEND: ONLINE'}).catch(()=>{$('#pb').className='pill bad';$('#pb').innerHTML='<i></i>BACKEND: OFFLINE';log('Backend /api/health unreachable. Analysis disabled.')});
+let backendReady=false,analysisRunning=false;
+const runButton=$('#runAnalysis'),analysisStatus=$('#analysisStatus'),analysisProgress=$('#analysisProgress');
+function refreshRunButton(){runButton.disabled=!backendReady||!S.video?.file||analysisRunning;runButton.textContent=analysisRunning?'Uploading / analyzing…':S.video?.videoId?'Run analysis again':'Run analysis'}
+async function api(path,options){
+ const response=await fetch(path,options);let body;
+ try{body=await response.json()}catch{body=null}
+ if(!response.ok)throw new Error(body?.detail||`Request failed (${response.status})`);
+ return body;
+}
+fetch('/api/health').then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()})
+ .then(()=>{$('#pb').className='pill ok';$('#pb').innerHTML='<i></i>BACKEND: ONLINE';backendReady=true;refreshRunButton()})
+ .catch(e=>{$('#pb').className='pill bad';$('#pb').innerHTML='<i></i>BACKEND: OFFLINE';analysisStatus.textContent='Backend unavailable. Reload the page when the backend is online.';log('Backend /api/health unreachable: '+e.message);refreshRunButton()});
 
 /* ---------- Video workspace (real local playback) ---------- */
 const vp=$('#vp'),drop=$('#drop'),fi=$('#fi');
-drop.onclick=()=>fi.click();fi.onchange=()=>load(fi.files[0]);
+drop.onclick=()=>fi.click();fi.onchange=()=>{load(fi.files[0]);fi.value=''};
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('h')};drop.ondragleave=()=>drop.classList.remove('h');
 drop.ondrop=e=>{e.preventDefault();drop.classList.remove('h');load(e.dataTransfer.files[0])};
-function load(f){if(!f)return;if(!f.type.startsWith('video/')){log('Rejected non-video file: '+f.name);return}
- vp.src=URL.createObjectURL(f);S.video={name:f.name};$('#ve').style.display='none';
- $('#lib').innerHTML=`<div class="pill" style="display:block;overflow:hidden;text-overflow:ellipsis">${f.name.replace(/</g,'&lt;')}</div>`;
- $('#pv').textContent='SESSION: '+f.name;log('Loaded '+f.name+' ('+(f.size/1048576).toFixed(1)+' MB). Not yet analysed.');}
+function load(f){if(!f)return;const ext=f.name.split('.').pop().toLowerCase();if(!['mp4','avi','mov'].includes(ext)){log('Rejected unsupported file: '+f.name+' (use MP4, AVI or MOV)');analysisStatus.textContent='Unsupported video type. Choose an MP4, AVI or MOV file.';return}
+ if(S.video?.url)URL.revokeObjectURL(S.video.url);
+ const url=URL.createObjectURL(f);vp.src=url;S.video={name:f.name,file:f,url,videoId:null};$('#ve').style.display='none';
+ const entry=document.createElement('div');entry.className='pill';entry.style.cssText='display:block;overflow:hidden;text-overflow:ellipsis';entry.textContent=f.name;$('#lib').replaceChildren(entry);
+ $('#pv').textContent='SESSION: '+f.name;$('#detectionResults').innerHTML=NO();$('#trackResults').innerHTML=NO();
+ analysisStatus.textContent='Video ready to upload ('+(f.size/1048576).toFixed(1)+' MB).';analysisProgress.hidden=true;analysisProgress.value=0;
+ log('Loaded '+f.name+' ('+(f.size/1048576).toFixed(1)+' MB).');refreshRunButton();}
+function wait(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function runAnalysis(){
+ const selected=S.video;if(!selected?.file||analysisRunning)return;
+ analysisRunning=true;refreshRunButton();analysisProgress.hidden=false;analysisProgress.value=0;
+ try{
+  if(!selected.videoId){
+   analysisStatus.textContent='Uploading video…';log('Uploading '+selected.name+' to backend.');
+   const form=new FormData();form.append('file',selected.file,selected.name);
+   const uploaded=await api('/api/videos',{method:'POST',body:form});selected.videoId=uploaded.id;
+   log('Upload complete. Video ID '+uploaded.id+'.');
+  }
+  analysisStatus.textContent='Starting analysis…';
+  await api(`/api/videos/${selected.videoId}/analyze`,{method:'POST'});
+  log('Analysis queued for video '+selected.videoId+'.');
+  while(true){
+   await wait(2000);
+   const status=await api(`/api/videos/${selected.videoId}`);
+   analysisProgress.value=status.progress||0;
+   analysisStatus.textContent=`${status.stage||status.status} · ${Math.round((status.progress||0)*100)}%`;
+   if(status.status==='failed')throw new Error(status.error||'Video analysis failed.');
+   if(status.status==='done')break;
+  }
+  const tracks=await api(`/api/videos/${selected.videoId}/tracks`);
+  $('#trackResults').replaceChildren();
+  if(!tracks.length){$('#trackResults').innerHTML=NO('Analysis finished; no tracked objects were detected.')}
+  else tracks.forEach(track=>{const row=document.createElement('div');row.className='pill';row.style.cssText='display:block;margin:6px 0;white-space:normal';row.textContent=`Track ${track.id} · ${track.cls} · ${track.n} frames · ${Number(track.first_t).toFixed(2)}s–${Number(track.last_t).toFixed(2)}s`;$('#trackResults').appendChild(row)});
+  $('#detectionResults').textContent=`Analysis complete. ${tracks.length} tracked object${tracks.length===1?'':'s'} found.`;
+  analysisStatus.textContent='Analysis complete.';analysisProgress.value=1;log('Analysis complete. '+tracks.length+' tracks returned.');
+ }catch(e){analysisStatus.textContent='Analysis error: '+e.message;log('Analysis failed: '+e.message)}
+ finally{analysisRunning=false;refreshRunButton();}
+}
+runButton.onclick=runAnalysis;
 vp.onloadedmetadata=()=>{S.video.duration=vp.duration;$('#ovd').innerHTML=fmt(vp.duration)+'<small>LOADED VIDEO DURATION</small>';ticks();upd()};
 function ticks(){const d=S.video.duration,tl=$('#tl');tl.innerHTML='';for(let i=0;i<=8;i++)tl.insertAdjacentHTML('beforeend',`<span style="left:${i*12.5}%">${fmt(d*i/8)}</span>`)}
 function upd(){$('#tm').textContent=fmt(vp.currentTime)+' / '+fmt(vp.duration);if(vp.duration)$('#sk').value=vp.currentTime/vp.duration*1000}
